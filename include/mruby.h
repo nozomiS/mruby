@@ -944,6 +944,7 @@ MRB_API mrb_value mrb_run(mrb_state*, struct RProc*, mrb_value);
 MRB_API mrb_value mrb_top_run(mrb_state*, struct RProc*, mrb_value, unsigned int);
 MRB_API mrb_value mrb_vm_run(mrb_state*, struct RProc*, mrb_value, unsigned int);
 MRB_API mrb_value mrb_vm_exec(mrb_state*, struct RProc*, mrb_code*);
+MRB_API void mrb_stack_extend(mrb_state *mrb, int room, int keep);
 /* compatibility macros */
 #define mrb_toplevel_run_keep(m,p,k) mrb_top_run((m),(p),mrb_top_self(m),(k))
 #define mrb_toplevel_run(m,p) mrb_toplevel_run_keep((m),(p),0)

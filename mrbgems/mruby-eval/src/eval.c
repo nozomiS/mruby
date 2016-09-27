@@ -4,143 +4,74 @@
 #include <mruby/irep.h>
 #include <mruby/proc.h>
 #include <mruby/opcode.h>
+#include <stdbool.h>
 
-static struct mrb_irep *
-get_closure_irep(mrb_state *mrb, int level)
+static unsigned int
+__capture_lvs(mrb_state *mrb, mrbc_context *cxt, struct REnv *env, bool pretend)
 {
-  struct mrb_context *c = mrb->c;
-  struct REnv *e = c->ci[-1].proc->env;
-  struct RProc *proc;
+  mrb_sym *syms = cxt->syms;
+  mrb_value *stack = mrb->c->stack + 1; /* All stack[0]s are belong to receiver */
+  unsigned int slen = 0;
 
-  if (level == 0) {
-    proc = c->ci[-1].proc;
-    if (MRB_PROC_CFUNC_P(proc)) {
-      return NULL;
+  while (env) {
+    struct RProc *proc;
+    mrb_irep *irep;
+
+    if (!MRB_ENV_STACK_SHARED_P(env)) {
+      break;
     }
-    return proc->body.irep;
+
+    proc = mrb->c->cibase[env->cioff].proc;
+    if (!proc || MRB_PROC_CFUNC_P(proc)) {
+      break;
+    }
+
+    irep = proc->body.irep;
+    if (!irep || irep->nlocals < 1) {
+      break;
+    }
+
+    if (!pretend && syms) {
+      int i;
+      for (i = 0; i < irep->nlocals - 1; i++) {
+        *syms++ = irep->lv[i].name;
+        *stack++ = env->stack[irep->lv[i].r];
+      }
+    }
+
+    slen += irep->nlocals - 1;
+
+    env = (struct REnv *)env->c;
   }
 
-  while (--level) {
-    e = (struct REnv*)e->c;
-    if (!e) return NULL;
-  }
-
-  if (!e) return NULL;
-  if (!MRB_ENV_STACK_SHARED_P(e)) return NULL;
-
-  proc = c->cibase[e->cioff].proc;
-
-  if (!proc || MRB_PROC_CFUNC_P(proc)) {
-    return NULL;
-  }
-  return proc->body.irep;
+  return slen;
 }
 
-static inline mrb_code
-search_variable(mrb_state *mrb, mrb_sym vsym, int bnest)
+static unsigned int
+capture_lvs(mrb_state *mrb, mrbc_context *cxt, struct REnv *env)
 {
-  mrb_irep *virep;
-  int level;
-  int pos;
+  unsigned int slen;
+  slen = __capture_lvs(mrb, cxt, env, true) + 1; /* 1 is for receiver */
 
-  for (level = 0; (virep = get_closure_irep(mrb, level)); level++) {
-    if (!virep || virep->lv == NULL) {
-      continue;
-    }
-    for (pos = 0; pos < virep->nlocals - 1; pos++) {
-      if (vsym == virep->lv[pos].name) {
-        return (MKARG_B(pos + 1) | MKARG_C(level + bnest));
-      }
-    }
-  }
+  mrb_stack_extend(mrb, slen, slen);
 
-  return 0;
-}
+  cxt->syms = (mrb_sym *)mrb_realloc(mrb, cxt->syms, slen * sizeof(mrb_sym));
+  cxt->slen = slen;
 
-static mrb_bool
-potential_upvar_p(struct mrb_locals *lv, uint16_t v, int argc, uint16_t nlocals)
-{
-  if (v >= nlocals) return FALSE;
-  /* skip arguments  */
-  if (v < argc+1) return FALSE;
-  return TRUE;
-}
+  /* collect them */
+  __capture_lvs(mrb, cxt, env, false);
 
-static void
-patch_irep(mrb_state *mrb, mrb_irep *irep, int bnest)
-{
-  size_t i;
-  mrb_code c;
-  int argc = 0;
-
-  for (i = 0; i < irep->ilen; i++) {
-    c = irep->iseq[i];
-    switch(GET_OPCODE(c)){
-    case OP_ENTER:
-      {
-        mrb_aspec ax = GETARG_Ax(c);
-        /* extra 1 means a slot for block */
-        argc = MRB_ASPEC_REQ(ax)+MRB_ASPEC_OPT(ax)+MRB_ASPEC_REST(ax)+MRB_ASPEC_POST(ax)+1;
-      }
-      break;
-
-    case OP_EPUSH:
-      patch_irep(mrb, irep->reps[GETARG_Bx(c)], bnest + 1);
-      break;
-
-    case OP_LAMBDA:
-      {
-        int arg_c = GETARG_c(c);
-        if (arg_c & OP_L_CAPTURE) {
-          patch_irep(mrb, irep->reps[GETARG_b(c)], bnest + 1);
-        }
-      }
-      break;
-
-    case OP_SEND:
-      if (GETARG_C(c) != 0) {
-        break;
-      }
-      {
-        mrb_code arg = search_variable(mrb, irep->syms[GETARG_B(c)], bnest);
-        if (arg != 0) {
-          /* must replace */
-          irep->iseq[i] = MKOPCODE(OP_GETUPVAR) | MKARG_A(GETARG_A(c)) | arg;
-        }
-      }
-      break;
-
-    case OP_MOVE:
-      /* src part */
-      if (potential_upvar_p(irep->lv, GETARG_B(c), argc, irep->nlocals)) {
-        mrb_code arg = search_variable(mrb, irep->lv[GETARG_B(c) - 1].name, bnest);
-        if (arg != 0) {
-          /* must replace */
-          irep->iseq[i] = MKOPCODE(OP_GETUPVAR) | MKARG_A(GETARG_A(c)) | arg;
-        }
-      }
-      /* dst part */
-      if (potential_upvar_p(irep->lv, GETARG_A(c), argc, irep->nlocals)) {
-        mrb_code arg = search_variable(mrb, irep->lv[GETARG_A(c) - 1].name, bnest);
-        if (arg != 0) {
-          /* must replace */
-          irep->iseq[i] = MKOPCODE(OP_SETUPVAR) | MKARG_A(GETARG_B(c)) | arg;
-        }
-      }
-      break;
-    }
-  }
+  return slen;
 }
 
 void mrb_codedump_all(mrb_state*, struct RProc*);
 
 static struct RProc*
-create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, const char *file, mrb_int line)
+create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, const char *file, mrb_int line, unsigned int *slen)
 {
   mrbc_context *cxt;
   struct mrb_parser_state *p;
   struct RProc *proc;
-  struct REnv *e;
   struct mrb_context *c = mrb->c;
 
   if (!mrb_nil_p(binding)) {
@@ -155,7 +86,22 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
   }
   mrbc_filename(mrb, cxt, file);
   cxt->capture_errors = TRUE;
-  cxt->no_optimize = TRUE;
+
+  /* capture variables in envs */
+  if (slen) {
+    mrb_callinfo *prev_ci = &c->ci[-1];
+    struct REnv *env = prev_ci->proc->env;
+
+    if (!MRB_PROC_CFUNC_P(prev_ci->proc)) {
+      env = (struct REnv *)mrb_obj_alloc(mrb, MRB_TT_ENV, (struct RClass *)env);
+      env->mid = prev_ci->mid;
+      env->cioff = prev_ci - c->cibase;
+      env->stack = c->ci->stackent;
+      MRB_SET_ENV_STACK_LEN(env, prev_ci->proc->body.irep->nlocals);
+      c->ci->env = env;
+    }
+    *slen = capture_lvs(mrb, cxt, env);
+  }
 
   p = mrb_parse_nstring(mrb, s, len, cxt);
 
@@ -175,28 +121,20 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
   }
 
   proc = mrb_generate_code(mrb, p);
+  mrb_parser_free(p);
+  mrbc_context_free(mrb, cxt);
+
   if (proc == NULL) {
     /* codegen error */
-    mrb_parser_free(p);
-    mrbc_context_free(mrb, cxt);
     mrb_raise(mrb, E_SCRIPT_ERROR, "codegen error");
   }
+
+  /* mrb_codedump_all(mrb, proc); */
+
   if (c->ci[-1].proc->target_class) {
     proc->target_class = c->ci[-1].proc->target_class;
   }
-  e = c->ci[-1].proc->env;
-  if (!e) e = c->ci[-1].env;
-  e = (struct REnv*)mrb_obj_alloc(mrb, MRB_TT_ENV, (struct RClass*)e);
-  e->mid = c->ci[-1].mid;
-  e->cioff = c->ci - c->cibase - 1;
-  e->stack = c->ci->stackent;
-  MRB_SET_ENV_STACK_LEN(e, c->ci[-1].proc->body.irep->nlocals);
-  c->ci->env = e;
-  proc->env = e;
-  patch_irep(mrb, proc->body.irep, 0);
-
-  mrb_parser_free(p);
-  mrbc_context_free(mrb, cxt);
+  proc->env = c->ci->env;
 
   return proc;
 }
@@ -211,14 +149,17 @@ f_eval(mrb_state *mrb, mrb_value self)
   mrb_int line = 1;
   mrb_value ret;
   struct RProc *proc;
+  unsigned int keep = 0;
 
   mrb_get_args(mrb, "s|ozi", &s, &len, &binding, &file, &line);
 
-  proc = create_proc_from_string(mrb, s, len, binding, file, line);
-  ret = mrb_top_run(mrb, proc, mrb->c->stack[0], 0);
+  proc = create_proc_from_string(mrb, s, len, binding, file, line, &keep);
+  ret = mrb_top_run(mrb, proc, mrb->c->stack[0], keep);
   if (mrb->exc) {
     mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));
   }
+
+  /* TODO: maybe need to writeback to env's stack from the stack */
 
   return ret;
 }
@@ -248,7 +189,7 @@ f_instance_eval(mrb_state *mrb, mrb_value self)
     c->ci->acc = CI_ACC_SKIP;
     cv = mrb_singleton_class(mrb, self);
     c->ci->target_class = mrb_class_ptr(cv);
-    proc = create_proc_from_string(mrb, s, len, mrb_nil_value(), file, line);
+    proc = create_proc_from_string(mrb, s, len, mrb_nil_value(), file, line, NULL);
     mrb->c->ci->env = NULL;
     return mrb_vm_run(mrb, proc, mrb->c->stack[0], 0);
   }
