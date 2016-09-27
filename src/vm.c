@@ -22,6 +22,10 @@
 #include "value_array.h"
 #include <mruby/throw.h>
 
+#ifdef MRB_MMAPPED_STACK
+#include <sys/mman.h>
+#endif
+
 #ifdef MRB_DISABLE_STDIO
 #if defined(__cplusplus)
 extern "C" {
@@ -34,17 +38,6 @@ void abort(void);
 
 #define STACK_INIT_SIZE 128
 #define CALLINFO_INIT_SIZE 32
-
-/* Define amount of linear stack growth. */
-#ifndef MRB_STACK_GROWTH
-#define MRB_STACK_GROWTH 128
-#endif
-
-/* Maximum stack depth. Should be set lower on memory constrained systems.
-The value below allows about 60000 recursive calls in the simplest case. */
-#ifndef MRB_STACK_MAX
-#define MRB_STACK_MAX (0x40000 - MRB_STACK_GROWTH)
-#endif
 
 #ifdef VM_DEBUG
 # define DEBUG(x) (x)
@@ -79,14 +72,46 @@ stack_copy(mrb_value *dst, const mrb_value *src, size_t size)
   }
 }
 
+#ifdef MRB_MMAPPED_STACK
+static int
+stack_get_mmap_flags()
+{
+  int flags = MAP_PRIVATE;
+#ifdef MAP_ANON
+  flags |= MAP_ANON;
+#endif
+#ifdef MAP_ANONYMOUS
+  flags |= MAP_ANONYMOUS;
+#endif
+#ifdef MAP_PRESERVE
+  flags |= MAP_NORESERVE;
+#endif
+#ifdef MAP_UNINITIALIZED
+  flags |= MAP_UNINITIALIZED;
+#endif
+  return flags;
+}
+#endif
+
 static void
 stack_init(mrb_state *mrb)
 {
   struct mrb_context *c = mrb->c;
 
   /* mrb_assert(mrb->stack == NULL); */
+#ifdef MRB_MMAPPED_STACK
+  int flags = stack_get_mmap_flags();
+  c->stbase = (mrb_value *)mmap(NULL, MRB_STACK_MAX + MRB_STACK_GROWTH,
+                    PROT_READ|PROT_WRITE,
+                    flags, -1, 0);
+  if (c->stbase == NULL) {
+    mrb_raise(mrb, E_SYSSTACK_ERROR, "failed to allocate stack using mmap");
+  }
+  c->stend = c->stbase + MRB_STACK_MAX;
+#else
   c->stbase = (mrb_value *)mrb_calloc(mrb, STACK_INIT_SIZE, sizeof(mrb_value));
   c->stend = c->stbase + STACK_INIT_SIZE;
+#endif
   c->stack = c->stbase;
 
   /* mrb_assert(ci == NULL); */
@@ -131,6 +156,7 @@ stack_extend_alloc(mrb_state *mrb, int room, int keep)
 {
   mrb_value *oldbase = mrb->c->stbase;
   int size = mrb->c->stend - mrb->c->stbase;
+#if !defined(MRB_MMAPPED_STACK)
   int off = mrb->c->stack - mrb->c->stbase;
 
 #ifdef MRB_STACK_EXTEND_DOUBLING
@@ -152,6 +178,7 @@ stack_extend_alloc(mrb_state *mrb, int room, int keep)
   mrb->c->stack = mrb->c->stbase + off;
   mrb->c->stend = mrb->c->stbase + size;
   envadjust(mrb, oldbase, mrb->c->stbase);
+#endif /* !defined(MRB_MMAPPED_STACK) */
 
   /* Raise an exception if the new stack size will be too large,
      to prevent infinite recursion. However, do this only after resizing the stack, so mrb_raise has stack space to work with. */

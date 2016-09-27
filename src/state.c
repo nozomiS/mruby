@@ -11,6 +11,9 @@
 #include <mruby/variable.h>
 #include <mruby/debug.h>
 #include <mruby/string.h>
+#ifdef MRB_MMAPPED_STACK 
+#include <sys/mman.h>
+#endif
 
 void mrb_init_core(mrb_state*);
 void mrb_init_mrbgems(mrb_state*);
@@ -221,7 +224,13 @@ MRB_API void
 mrb_free_context(mrb_state *mrb, struct mrb_context *c)
 {
   if (!c) return;
+#ifdef MRB_MMAPPED_STACK 
+  if (c->stbase) {
+    munmap(c->stbase, MRB_STACK_MAX + MRB_STACK_GROWTH);
+  }
+#else
   mrb_free(mrb, c->stbase);
+#endif
   mrb_free(mrb, c->cibase);
   mrb_free(mrb, c->rescue);
   mrb_free(mrb, c->ensure);
