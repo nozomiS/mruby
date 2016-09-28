@@ -39,6 +39,17 @@ void abort(void);
 #define STACK_INIT_SIZE 128
 #define CALLINFO_INIT_SIZE 32
 
+/* Define amount of linear stack growth. */
+#ifndef MRB_STACK_GROWTH
+#define MRB_STACK_GROWTH 128
+#endif
+
+/* Maximum stack depth. Should be set lower on memory constrained systems.
+The value below allows about 60000 recursive calls in the simplest case. */
+#ifndef MRB_STACK_MAX
+#define MRB_STACK_MAX (MRB_STACK_LIMIT - MRB_STACK_GROWTH)
+#endif
+
 #ifdef VM_DEBUG
 # define DEBUG(x) (x)
 #else
@@ -83,7 +94,7 @@ stack_get_mmap_flags()
 #ifdef MAP_ANONYMOUS
   flags |= MAP_ANONYMOUS;
 #endif
-#ifdef MAP_PRESERVE
+#ifdef MAP_NORESERVE
   flags |= MAP_NORESERVE;
 #endif
 #ifdef MAP_UNINITIALIZED

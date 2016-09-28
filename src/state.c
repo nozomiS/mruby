@@ -226,7 +226,7 @@ mrb_free_context(mrb_state *mrb, struct mrb_context *c)
   if (!c) return;
 #ifdef MRB_MMAPPED_STACK 
   if (c->stbase) {
-    munmap(c->stbase, MRB_STACK_MAX + MRB_STACK_GROWTH);
+    munmap(c->stbase, MRB_STACK_LIMIT);
   }
 #else
   mrb_free(mrb, c->stbase);

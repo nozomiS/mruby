@@ -65,6 +65,10 @@ struct mrb_state;
  */
 typedef void* (*mrb_allocf) (struct mrb_state *mrb, void*, size_t, void *ud);
 
+#ifndef MRB_STACK_LIMIT
+#define MRB_STACK_LIMIT 0x40000
+#endif
+
 #ifndef MRB_FIXED_STATE_ATEXIT_STACK_SIZE
 #define MRB_FIXED_STATE_ATEXIT_STACK_SIZE 5
 #endif
