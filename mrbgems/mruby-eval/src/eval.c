@@ -16,8 +16,6 @@ struct scope {
 };
 
 struct binding_context {
-  struct mrb_data_type data_type;
-
   struct scope *scopes;
   mrb_int scopes_len;
 
@@ -30,18 +28,18 @@ struct binding_context {
 static void
 mrb_binding_dfree(mrb_state *mrb, void *ptr)
 {
-  struct binding_context *cxt = (struct binding_context *)ptr;
-  if (cxt) {
+  struct binding_context *bcxt = (struct binding_context *)ptr;
+  if (bcxt) {
     mrb_int i;
-    for (i = 0; i < cxt->scopes_len; i++) {
-      struct scope *s = &cxt->scopes[i];
+    for (i = 0; i < bcxt->scopes_len; i++) {
+      struct scope *s = &bcxt->scopes[i];
       /* s->env will be sweeped */
 
       if (i != 0) {
         mrb_free(mrb, s->lv);
       }
     }
-    mrb_free(mrb, cxt->scopes);
+    mrb_free(mrb, bcxt->scopes);
   }
   mrb_free(mrb, ptr);
 }
@@ -173,12 +171,12 @@ get_callers_depth(mrb_state *mrb)
 }
 
 static void 
-setup_scopes(mrb_state *mrb, struct binding_context *cxt, struct REnv *env, mrb_value catcher)
+setup_scopes(mrb_state *mrb, struct binding_context *bcxt, struct REnv *env, mrb_value catcher)
 {
   struct scope *s;
 
   /* create a virtual env for additional local variable space */
-  s = &cxt->scopes[0];
+  s = &bcxt->scopes[0];
   s->env = (struct REnv *)mrb_obj_alloc(mrb, MRB_TT_ENV, (struct RClass *)env);
   s->env->mid = 0;
   MRB_ENV_UNSHARE_STACK(s->env);
@@ -186,12 +184,12 @@ setup_scopes(mrb_state *mrb, struct binding_context *cxt, struct REnv *env, mrb_
   s->env->stack[0] = mrb_nil_value(); /* dummy R0 */
   MRB_SET_ENV_STACK_LEN(s->env, 1);
 
-  s->lv = &cxt->additiona_lv[0];
+  s->lv = &bcxt->additiona_lv[0];
   s->lv_len = 0;
   mrb_ary_push(mrb, catcher, mrb_obj_value(s->env));
 
   /* get the flatten envs */
-  s = &cxt->scopes[1];
+  s = &bcxt->scopes[1];
   while (env) {
     mrb_irep *irep = get_closure_irep(mrb, env);
     if (irep) {
@@ -222,37 +220,37 @@ mrb_binding_initialize(mrb_state *mrb, mrb_value self)
   mrb_callinfo *prev_ci;
   int depth;
   struct REnv *env;
-  struct binding_context *cxt = mrb_malloc(mrb, sizeof(struct binding_context));
+  struct binding_context *bcxt = mrb_malloc(mrb, sizeof(struct binding_context));
 
-  mrb_data_init(self, cxt, &binding_data_type);
+  mrb_data_init(self, bcxt, &binding_data_type);
 
   /* measure depth and create context */
   depth = get_callers_depth(mrb);
 
   env = insert_callers_env(mrb, depth);
-  cxt->scopes_len = get_env_levels(env) + 1; /* +1 is for virtual */
+  bcxt->scopes_len = get_env_levels(env) + 1; /* +1 is for virtual */
 
-  cxt->scopes = (struct scope *)mrb_malloc(mrb, sizeof(struct scope) * cxt->scopes_len);
-  memset(cxt->scopes, 0, sizeof(struct scope) * cxt->scopes_len);
+  bcxt->scopes = (struct scope *)mrb_malloc(mrb, sizeof(struct scope) * bcxt->scopes_len);
+  memset(bcxt->scopes, 0, sizeof(struct scope) * bcxt->scopes_len);
 
   /* create a catcher to catch all relative objects */
-  catcher = mrb_ary_new_capa(mrb, cxt->scopes_len + 2);
+  catcher = mrb_ary_new_capa(mrb, bcxt->scopes_len + 2);
   mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "__catcher__"), catcher);
 
   /* collect local variables */
-  setup_scopes(mrb, cxt, env, catcher);
+  setup_scopes(mrb, bcxt, env, catcher);
 
   /* save the R0(receiver) since it will be destroyed */
-  cxt->receiver = cxt->scopes[1].env->stack[0];
-  mrb_ary_push(mrb, catcher, cxt->receiver);
+  bcxt->receiver = bcxt->scopes[1].env->stack[0];
+  mrb_ary_push(mrb, catcher, bcxt->receiver);
 
   /* save the target_class */
   prev_ci = &mrb->c->ci[depth];
   if (prev_ci->target_class) {
-    cxt->target_class = mrb_obj_value(prev_ci->target_class); 
-    mrb_ary_push(mrb, catcher, cxt->target_class);
+    bcxt->target_class = mrb_obj_value(prev_ci->target_class); 
+    mrb_ary_push(mrb, catcher, bcxt->target_class);
   } else {
-    cxt->target_class = mrb_nil_value();
+    bcxt->target_class = mrb_nil_value();
   }
 
   return self;
@@ -377,22 +375,21 @@ static mrb_value
 mrb_binding_lvs(mrb_state *mrb, mrb_value self)
 {
   mrb_value ary = mrb_ary_new(mrb);
-  struct binding_context *cxt = DATA_PTR(self);
+  struct binding_context *bcxt = DATA_PTR(self);
   mrb_int i;
   int ai = mrb_gc_arena_save(mrb);
 
-  for (i = 0; i < cxt->scopes_len; i++) {
-    struct scope *s = &cxt->scopes[i];
+  for (i = 0; i < bcxt->scopes_len; i++) {
+    struct scope *s = &bcxt->scopes[i];
     mrb_int j;
 
     for (j = 0; j < s->lv_len; j++) {
-      if (s->lv[j].name) {
-        mrb_raise(mrb, E_RUNTIME_ERROR, "unexpected symbol");
+      if (!s->lv[j].name) {
+        continue;
       }
       mrb_ary_push(mrb, ary, mrb_symbol_value(s->lv[j].name));
+      mrb_gc_arena_restore(mrb, ai);
     }
-
-    mrb_gc_arena_restore(mrb, ai);
   }
 
   return ary;
@@ -401,9 +398,9 @@ mrb_binding_lvs(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_binding_receiver(mrb_state *mrb, mrb_value self)
 {
-  struct binding_context *cxt = DATA_PTR(self);
+  struct binding_context *bcxt = DATA_PTR(self);
 
-  return cxt->receiver;
+  return bcxt->receiver;
 }
 
 static mrb_value
@@ -436,12 +433,12 @@ mrb_mruby_binding_init(mrb_state *mrb)
 static void
 writeback_lvs_to_scopes(mrb_state *mrb, mrb_value binding)
 {
-  struct binding_context *cxt = DATA_PTR(binding);
-  struct scope *s = &cxt->scopes[0];
+  struct binding_context *bcxt = DATA_PTR(binding);
+  struct scope *s = &bcxt->scopes[0];
   const mrb_value *sstack = mrb->c->stack + 1;
   mrb_int i;
 
-  for (i = 0; i < cxt->scopes_len; i++, s++) {
+  for (i = 0; i < bcxt->scopes_len; i++, s++) {
     mrb_int j;
     mrb_value *dstack = s->env->stack;
 
@@ -454,14 +451,14 @@ writeback_lvs_to_scopes(mrb_state *mrb, mrb_value binding)
 }
 
 static unsigned int
-__push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *binding, mrb_bool pretend) {
+__push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *bcxt, mrb_bool pretend) {
   mrb_int i;
   mrb_sym *syms = cxt->syms;
   mrb_value *dstack = mrb->c->stack + 1; /* All your stack[0]s are belong to receiver */
-  struct scope *s = &binding->scopes[0];
+  struct scope *s = &bcxt->scopes[0];
   unsigned int slen = 0;
 
-  for (i = 0; i < binding->scopes_len; i++, s++) {
+  for (i = 0; i < bcxt->scopes_len; i++, s++) {
     const mrb_value *sstack = s->env->stack;
     mrb_int j;
 
@@ -515,7 +512,6 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
   mrbc_context *cxt;
   struct mrb_parser_state *p;
   struct RProc *proc;
-  struct mrb_context *c = mrb->c;
   struct REnv *env = NULL;
 
   if (mrb_nil_p(binding)) {
