@@ -194,8 +194,6 @@ setup_scopes(mrb_state *mrb, struct binding_context *cxt, struct REnv *env, mrb_
   s = &cxt->scopes[1];
   while (env) {
     mrb_irep *irep = get_closure_irep(mrb, env);
-    s->env = env;
-    mrb_ary_push(mrb, catcher, mrb_obj_value(env));
     if (irep) {
       s->lv_len = irep->nlocals > 0 ? irep->nlocals - 1 : 0;
       s->lv = mrb_malloc(mrb, sizeof(struct mrb_locals) * s->lv_len);
@@ -204,10 +202,13 @@ setup_scopes(mrb_state *mrb, struct binding_context *cxt, struct REnv *env, mrb_
         int i;
         for (i = 0; i < s->lv_len; i++) {
           s->lv[i] = irep->lv[i];
-          fprintf(stderr, "%s %d\n", mrb_sym2name(mrb, s->lv[i].name), s->lv[i].r);
+          //fprintf(stderr, "%s %d\n", mrb_sym2name(mrb, s->lv[i].name), s->lv[i].r);
         }
       }
     }
+
+    s->env = env;
+    mrb_ary_push(mrb, catcher, mrb_obj_value(env));
 
     s++;
     env = (struct REnv *)env->c;
@@ -381,7 +382,6 @@ mrb_binding_lvs(mrb_state *mrb, mrb_value self)
   int ai = mrb_gc_arena_save(mrb);
 
   for (i = 0; i < cxt->scopes_len; i++) {
-  //for (i = cxt->scopes_len - 1; i >= 0; i--) {
     struct scope *s = &cxt->scopes[i];
     mrb_int j;
 
@@ -467,8 +467,9 @@ __push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *
 
     for (j = 0; j < s->lv_len; j++) {
       if (!s->lv[j].name) {
-        mrb_raise(mrb, E_RUNTIME_ERROR, "unexpected symbol");
+        continue;
       }
+
       slen++;
 
       if (!pretend) {
@@ -566,10 +567,6 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
 
    mrb_codedump_all(mrb, proc); 
 
-  if (c->ci[-1].proc->target_class) {
-    proc->target_class = c->ci[-1].proc->target_class;
-  }
-
   proc->env = env;
 
   return proc;
@@ -595,6 +592,13 @@ f_eval(mrb_state *mrb, mrb_value self)
   }
 
   proc = create_proc_from_string(mrb, s, len, binding, file, line, &keep);
+  {
+    struct binding_context *bcxt = (struct binding_context *)DATA_PTR(binding);
+    if (bcxt && !mrb_nil_p(bcxt->target_class)) {
+      proc->target_class = mrb_class_ptr(bcxt->target_class); 
+    }
+  }
+
 
   ret = mrb_top_run(mrb, proc, mrb->c->stack[0], keep);
   if (mrb->exc) {
