@@ -6,7 +6,7 @@
 #include <mruby/array.h>
 #include <mruby/variable.h>
 
-#define ARG_MAX 127 / 2
+#define ARG_MAX 127
 
 struct scope {
   struct REnv *env;
@@ -50,48 +50,6 @@ static mrb_data_type binding_data_type = {
 };
 
 
-void dump_ci(mrb_state *mrb)
-{
-  mrb_callinfo *ci = mrb->c->ci;
-  int i = 0;
-  fprintf(stderr, "c->stack: %p\n", mrb->c->stack);
-  fprintf(stderr, "c->stbase: %p\n", mrb->c->stbase);
-  while (1) {
-    fprintf(stderr, "ci[%2d].mid: %x '%s'\n", -i, ci->mid, mrb_sym2name(mrb, ci->mid));
-    fprintf(stderr, "ci[%2d].env: %p\n", -i, ci->env);
-    if (ci->env) {
-      fprintf(stderr, "ci[%2d].env->c: %p\n", -i, ci->env ? ci->env->c : NULL);
-      fprintf(stderr, "ci[%2d].env->flags: %d\n", -i, ci->env ? ci->env->flags : 0);
-    }
-    fprintf(stderr, "ci[%2d].stackent: %p\n", -i, ci->stackent);
-    fprintf(stderr, "ci[%2d].stackent[0].obj_ptr: %p\n", -i, mrb_obj_ptr(ci->stackent[0]));
-    fprintf(stderr, "ci[%2d].stackent[1].obj_ptr: %p\n", -i, mrb_obj_ptr(ci->stackent[1]));
-    fprintf(stderr, "ci[%2d].stackent[2].obj_ptr: %p\n", -i, mrb_obj_ptr(ci->stackent[2]));
-    fprintf(stderr, "ci[%2d].proc->env: %p\n", -i, ci->proc->env);
-    if (ci->proc && ci->proc->env) {
-      fprintf(stderr, "ci[%2d].proc->env->flags: %d\n", -i, ci->proc->env->flags);
-      fprintf(stderr, "ci[%2d].proc->env->c: %p\n", -i, ci->proc->env->c);
-    }
-    fprintf(stderr, "ci[%2d].proc is : %p\n", -i, ci->proc);
-    if (ci->proc) {
-      fprintf(stderr, "ci[%2d].proc is : %s\n", -i, (MRB_PROC_CFUNC_P(ci->proc) ? "cfunc" : "irep"));
-      if (!MRB_PROC_CFUNC_P(ci->proc)) {
-        fprintf(stderr, "ci[%2d].proc->irep: %p\n", -i, ci->proc->body.irep);
-        fprintf(stderr, "ci[%2d].proc->irep->lv: %p\n", -i, ci->proc->body.irep->lv);
-        fprintf(stderr, "ci[%2d].proc->irep->nlocals: %d\n", -i, ci->proc->body.irep->nlocals);
-      }
-   }
-   fprintf(stderr, "\n");
-    //fprintf(stderr, "ci[%2d].proc->env->stack: %p\n", -i, ci->proc->env ? ci->proc->env->stack : NULL);
-    //fprintf(stderr, "ci[%2d].proc->env->stack[0].obj_ptr: %p\n", -i, (ci->proc->env && ci->proc->env->stack) ? mrb_obj_ptr(ci->proc->env->stack[0]) : NULL);
-    if (ci == mrb->c->cibase) {
-      break;
-    }
-    ci--;
-    i++;
-  }
-}
-
 static mrb_irep *
 get_closure_irep(mrb_state *mrb, struct REnv *env) {
   struct RProc *proc;
@@ -122,7 +80,6 @@ insert_callers_env(mrb_state *mrb, int depth) {
   struct REnv *env;
   struct mrb_context *cxt = mrb->c;
 
-  dump_ci(mrb);
   prev_ci = &cxt->ci[depth];
   env = prev_ci->proc->env;
   env = (struct REnv *)mrb_obj_alloc(mrb, MRB_TT_ENV, (struct RClass *)env);
@@ -195,7 +152,6 @@ setup_scopes(mrb_state *mrb, struct binding_context *bcxt, struct REnv *env, mrb
     if (irep) {
       s->lv_len = irep->nlocals > 0 ? irep->nlocals - 1 : 0;
       s->lv = mrb_malloc(mrb, sizeof(struct mrb_locals) * s->lv_len);
-      fprintf(stderr, "env;%p s->lv:%p irep->lv:%p\n", env, s->lv, irep->lv);
       if (s->lv && irep->lv) {
         int i;
         for (i = 0; i < s->lv_len; i++) {
@@ -439,8 +395,8 @@ writeback_lvs_to_scopes(mrb_state *mrb, mrb_value binding)
   mrb_int i;
 
   for (i = 0; i < bcxt->scopes_len; i++, s++) {
-    mrb_int j;
     mrb_value *dstack = s->env->stack;
+    mrb_int j;
 
     for (j = 0; j < s->lv_len; j++) {
       if (s->lv[j].name) {
@@ -561,7 +517,7 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
     mrb_raise(mrb, E_SCRIPT_ERROR, "codegen error");
   }
 
-   mrb_codedump_all(mrb, proc); 
+  /* mrb_codedump_all(mrb, proc); */
 
   proc->env = env;
 
@@ -594,7 +550,6 @@ f_eval(mrb_state *mrb, mrb_value self)
       proc->target_class = mrb_class_ptr(bcxt->target_class); 
     }
   }
-
 
   ret = mrb_top_run(mrb, proc, mrb->c->stack[0], keep);
   if (mrb->exc) {
