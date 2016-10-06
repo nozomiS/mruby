@@ -80,8 +80,12 @@ insert_callers_env(mrb_state *mrb, int depth) {
   struct REnv *env;
   struct mrb_context *cxt = mrb->c;
 
+  //dump_ci(mrb);
   prev_ci = &cxt->ci[depth];
   env = prev_ci->proc->env;
+  if (!env) {
+    env = prev_ci->env;
+  }
   env = (struct REnv *)mrb_obj_alloc(mrb, MRB_TT_ENV, (struct RClass *)env);
 
   env->mid = prev_ci->mid;
@@ -127,7 +131,7 @@ get_callers_depth(mrb_state *mrb)
   return (-depth - 1);
 }
 
-static void 
+static void
 setup_scopes(mrb_state *mrb, struct binding_context *bcxt, struct REnv *env, mrb_value catcher)
 {
   struct scope *s;
@@ -156,7 +160,6 @@ setup_scopes(mrb_state *mrb, struct binding_context *bcxt, struct REnv *env, mrb
         int i;
         for (i = 0; i < s->lv_len; i++) {
           s->lv[i] = irep->lv[i];
-          //fprintf(stderr, "%s %d\n", mrb_sym2name(mrb, s->lv[i].name), s->lv[i].r);
         }
       }
     }
@@ -203,7 +206,7 @@ mrb_binding_initialize(mrb_state *mrb, mrb_value self)
   /* save the target_class */
   prev_ci = &mrb->c->ci[depth];
   if (prev_ci->target_class) {
-    bcxt->target_class = mrb_obj_value(prev_ci->target_class); 
+    bcxt->target_class = mrb_obj_value(prev_ci->target_class);
     mrb_ary_push(mrb, catcher, bcxt->target_class);
   } else {
     bcxt->target_class = mrb_nil_value();
@@ -387,9 +390,8 @@ mrb_mruby_binding_init(mrb_state *mrb)
 /*******************************************************************/
 
 static void
-writeback_lvs_to_scopes(mrb_state *mrb, mrb_value binding)
+writeback_lvs_to_scopes(mrb_state *mrb, struct binding_context *bcxt)
 {
-  struct binding_context *bcxt = DATA_PTR(binding);
   struct scope *s = &bcxt->scopes[0];
   const mrb_value *sstack = mrb->c->stack + 1;
   mrb_int i;
@@ -408,11 +410,11 @@ writeback_lvs_to_scopes(mrb_state *mrb, mrb_value binding)
 
 static unsigned int
 __push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *bcxt, mrb_bool pretend) {
-  mrb_int i;
   mrb_sym *syms = cxt->syms;
-  mrb_value *dstack = mrb->c->stack + 1; /* All your stack[0]s are belong to receiver */
   struct scope *s = &bcxt->scopes[0];
+  mrb_value *dstack = s->env->stack + s->lv_len + 1;
   unsigned int slen = 0;
+  mrb_int i;
 
   for (i = 0; i < bcxt->scopes_len; i++, s++) {
     const mrb_value *sstack = s->env->stack;
@@ -427,7 +429,9 @@ __push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *
 
       if (!pretend) {
         *syms++ = s->lv[j].name;
-        *dstack++ = sstack[s->lv[j].r];
+        if (i != 0) { /* virtual env is already taken up */
+          *dstack++ = sstack[s->lv[j].r];
+        }
       }
     }
   }
@@ -435,48 +439,66 @@ __push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *
   return slen;
 }
 
-void mrb_stack_extend(mrb_state *mrb, int room, int keep);
-
 static unsigned int
-push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, mrb_value binding)
+push_lvs_to_mstack(mrb_state *mrb, mrbc_context *cxt, struct binding_context *bcxt)
 {
-  struct binding_context *bcxt = (struct binding_context *)DATA_PTR(binding);
+  struct scope *s = &bcxt->scopes[0];
   /* just get the required stack length */
-  unsigned int slen = __push_lvs_to_mstack(mrb, cxt, bcxt, TRUE) + 1;
+  unsigned int slen = __push_lvs_to_mstack(mrb, cxt, bcxt, TRUE);
 
-  /*
-   * ci->env must be set prior to calling mrb_stack_extend() because
-   * env->stack might be reallocated and envadjust() referes
-   * ci->env to rearrange each env->stack right address.
-   */
-  mrb->c->ci->env = bcxt->scopes[0].env;
-  mrb_stack_extend(mrb, slen, slen);
+  mrb->c->ci->env = s->env;
+  s->env->stack = mrb_realloc(mrb, s->env->stack,
+                            sizeof(mrb_value) * (slen + 2));
 
   cxt->syms = (mrb_sym *)mrb_realloc(mrb, cxt->syms, sizeof(mrb_sym) * slen);
   cxt->slen = slen;
 
   __push_lvs_to_mstack(mrb, cxt, bcxt, FALSE);
 
-  return slen;
+  return slen + 1;
 }
 
 void mrb_codedump_all(mrb_state*, struct RProc*);
 
+static mrb_value
+dummy_func(mrb_state *mrb, mrb_value self)
+{
+  return mrb_nil_value();
+}
+
+// what an ugly implementation. but i have no way except this...
+static void set_args(mrb_state *mrb, mrb_int argc, mrb_value *argv,
+              struct binding_context *bcxt)
+{
+  int nregs = mrb->c->ci->nregs;
+  mrb_value dummy_proc = mrb_obj_value(mrb_proc_new_cfunc(mrb, dummy_func));
+
+  mrb->c->ci->nregs = 0;
+  mrb_yield_with_class(mrb, dummy_proc, argc, argv,
+                   bcxt->receiver, mrb->object_class);
+  mrb->c->ci->nregs = nregs;
+}
+
+
 static struct RProc*
-create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, const char *file, mrb_int line, unsigned int *slen)
+create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, const char *file, mrb_int line)
 {
   mrbc_context *cxt;
   struct mrb_parser_state *p;
   struct RProc *proc;
   struct REnv *env = NULL;
+  struct binding_context *bcxt = NULL;
 
   if (mrb_nil_p(binding)) {
     mrb_value argv = mrb_fixnum_value(1);
 
     binding = mrb_obj_new(mrb, mrb_class_get(mrb, "Binding"), 1, &argv);
-  } else if (mrb_type(binding) != MRB_TT_DATA) {
+  }
+  else if (mrb_type(binding) != MRB_TT_DATA) { // XXX need more check
     mrb_raise(mrb, E_ARGUMENT_ERROR, "invalid type of binding");
   }
+
+  bcxt = (struct binding_context *)DATA_PTR(binding);
 
   cxt = mrbc_context_new(mrb);
   cxt->lineno = line;
@@ -488,9 +510,7 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
   cxt->capture_errors = TRUE;
 
   /* capture variables in envs */
-  if (slen) {
-    *slen = push_lvs_to_mstack(mrb, cxt, binding); 
-  }
+  push_lvs_to_mstack(mrb, cxt, bcxt);
 
   p = mrb_parse_nstring(mrb, s, len, cxt);
   /* only occur when memory ran out */
@@ -521,6 +541,9 @@ create_proc_from_string(mrb_state *mrb, char *s, int len, mrb_value binding, con
 
   proc->env = env;
 
+  set_args(mrb, proc->body.irep->nlocals,
+                 bcxt->scopes[0].env->stack + 1, bcxt);
+
   return proc;
 }
 
@@ -534,7 +557,7 @@ f_eval(mrb_state *mrb, mrb_value self)
   mrb_int line = 1;
   mrb_value ret;
   struct RProc *proc;
-  unsigned int keep = 0;
+  struct binding_context *bcxt;
 
   mrb_get_args(mrb, "s|ozi", &s, &len, &binding, &file, &line);
   if (mrb_nil_p(binding)) {
@@ -542,21 +565,23 @@ f_eval(mrb_state *mrb, mrb_value self)
 
     binding = mrb_obj_new(mrb, mrb_class_get(mrb, "Binding"), 1, &argv);
   }
-
-  proc = create_proc_from_string(mrb, s, len, binding, file, line, &keep);
-  {
-    struct binding_context *bcxt = (struct binding_context *)DATA_PTR(binding);
-    if (bcxt && !mrb_nil_p(bcxt->target_class)) {
-      proc->target_class = mrb_class_ptr(bcxt->target_class); 
-    }
+  else if (mrb_type(binding) != MRB_TT_DATA) { // XXX need more check
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "invalid type of binding");
   }
 
-  ret = mrb_top_run(mrb, proc, mrb->c->stack[0], keep);
+  proc = create_proc_from_string(mrb, s, len, binding, file, line);
+
+  bcxt = (struct binding_context *)DATA_PTR(binding);
+  if (bcxt && !mrb_nil_p(bcxt->target_class)) {
+    proc->target_class = mrb_class_ptr(bcxt->target_class);
+  }
+
+  ret = mrb_top_run(mrb, proc, bcxt->receiver, proc->body.irep->nlocals);
   if (mrb->exc) {
     mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));
   }
 
-  writeback_lvs_to_scopes(mrb, binding);
+  writeback_lvs_to_scopes(mrb, bcxt);
 
   return ret;
 }
@@ -581,15 +606,15 @@ f_instance_eval(mrb_state *mrb, mrb_value self)
     mrb_int line = 1;
     mrb_value cv;
     struct RProc *proc;
-    unsigned int keep = 0;
 
     mrb_get_args(mrb, "s|zi", &s, &len, &file, &line);
     c->ci->acc = CI_ACC_SKIP;
     cv = mrb_singleton_class(mrb, self);
     c->ci->target_class = mrb_class_ptr(cv);
-    proc = create_proc_from_string(mrb, s, len, mrb_nil_value(), file, line, &keep);
+
+    proc = create_proc_from_string(mrb, s, len, mrb_nil_value(), file, line);
     c->ci->env = NULL;
-    return mrb_vm_run(mrb, proc, c->stack[0], keep);
+    return mrb_vm_run(mrb, proc, self, proc->body.irep->nlocals);
   }
   else {
     mrb_get_args(mrb, "&", &b);

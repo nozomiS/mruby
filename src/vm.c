@@ -170,12 +170,6 @@ stack_extend(mrb_state *mrb, int room, int keep)
   init_new_stack_space(mrb, room, keep);
 }
 
-void
-mrb_stack_extend(mrb_state *mrb, int room, int keep)
-{
-  stack_extend(mrb, room, keep);
-}
-
 static inline struct REnv*
 uvenv(mrb_state *mrb, int up)
 {
